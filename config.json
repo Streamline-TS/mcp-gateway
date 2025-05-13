@@ -1,0 +1,23 @@
+{
+  "sseProxy": {
+    "allowedServers": ["fetch"],
+    "authenticate": {
+      "bearer": {
+        "token": "oaCCf6807O9QHyvr-gZXn89LZV0XnZIbe5BqYClTGR0"
+      }
+    },
+    "address": "127.0.0.1",
+    "port": 3000,
+    "workers": 4
+  },
+  "mcpServers": {
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    }
+  }
+}

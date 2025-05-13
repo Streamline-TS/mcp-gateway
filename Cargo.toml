@@ -1,0 +1,10 @@
+[package]
+name = "mcp-gateway"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mcp-runner = "0.3.1"
+tokio = "1.45.0"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
