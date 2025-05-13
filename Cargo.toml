@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 mcp-runner = "0.3.1"
-tokio = "1.45.0"
+tokio = { version = "1.45.0", features = ["full", "signal"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
+daemonize = "0.5.0"
+nix = "0.26.2"
