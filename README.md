@@ -231,11 +231,3 @@ Note: Cross-compilation might require additional toolchains and libraries depend
 ## License
 
 This project is licensed under the [GNU General Public License v3.0 (GPL-3.0)](https://www.gnu.org/licenses/gpl-3.0.en.html).
-
-The GPL-3.0 is a strong copyleft license that requires anyone who distributes your code or derivative works to make the source available under the same terms. This ensures the software remains free and open source.
-
-Key points of the GPL-3.0:
-- Freedom to use, study, share, and modify the software
-- Derivative works must be distributed under the same license terms
-- Source code must be made available when distributing the software
-- Patent rights are explicitly granted
