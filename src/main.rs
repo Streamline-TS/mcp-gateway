@@ -1,4 +1,4 @@
-// Copyright (C) 2025 MCP Gateway Contributors
+// Copyright (C) 2025 MCP Streamline Tech LLC
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
