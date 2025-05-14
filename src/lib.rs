@@ -498,6 +498,7 @@ impl McpGateway {
         
         let daemonize = Daemonize::new()
             .pid_file(&pid_file)  // Let the Daemonize library handle the initial PID file
+            .working_directory(std::env::current_dir().unwrap())  // Keep current directory
             .umask(0o022) // More permissive umask for files (world readable)
             .stdout(
                 std::fs::OpenOptions::new()
@@ -525,6 +526,23 @@ impl McpGateway {
         match daemonize.start() {
             Ok(_) => {
                 // We're in the daemon process now
+                // IMPORTANT: Immediately update the PID file with the child's PID
+                let child_pid = std::process::id().to_string();
+                if let Err(e) = std::fs::write(&pid_file, child_pid) {
+                    eprintln!(
+                        "[{}] Failed to update PID file with child PID: {}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                        e
+                    );
+                    // Continue anyway since this is non-fatal
+                } else {
+                    eprintln!(
+                        "[{}] Successfully updated PID file with daemon PID: {}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                        std::process::id()
+                    );
+                }
+                
                 // Logging will be initialized in run() after this returns
                 println!(
                     "[{}] Daemon process started with PID {}",
@@ -701,12 +719,33 @@ impl McpGateway {
         if self.daemon {
             info!("Running in daemon mode with PID file: {}", self.pid_file);
             
-            // Ensure the PID file contains our current PID (daemon process)
-            // This is important because the Daemonize library might have created it with parent PID
-            if let Err(e) = self.write_pid_file() {
-                warn!("Failed to update PID file with daemon process ID: {}", e);
-            } else {
-                info!("Updated PID file with daemon process ID: {}", std::process::id());
+            // Note: PID file should already contain daemon process ID (updated in daemonize())
+            // But let's verify it just to be safe
+            match self.read_pid_file() {
+                Ok(Some(pid)) if pid == std::process::id() => {
+                    info!("Confirmed PID file contains correct daemon process ID: {}", pid);
+                },
+                Ok(Some(pid)) => {
+                    warn!("PID file contains incorrect process ID: {}. Updating to current PID: {}", 
+                          pid, std::process::id());
+                    if let Err(e) = self.write_pid_file() {
+                        warn!("Failed to update PID file with daemon process ID: {}", e);
+                    }
+                },
+                Ok(None) => {
+                    warn!("PID file exists but contains no valid PID. Updating with current PID");
+                    if let Err(e) = self.write_pid_file() {
+                        warn!("Failed to update PID file with daemon process ID: {}", e);
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to read PID file: {}. Creating new one", e);
+                    if let Err(e) = self.write_pid_file() {
+                        warn!("Failed to update PID file with daemon process ID: {}", e);
+                    } else {
+                        info!("Updated PID file with daemon process ID: {}", std::process::id());
+                    }
+                }
             }
         } else {
             info!("Running in foreground mode");
