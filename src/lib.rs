@@ -4,11 +4,6 @@ use std::io::Read;
 use std::path::Path;
 use std::process;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::select;
-use tokio::task;
-use tokio::time::Duration;
-use tokio::time::sleep;
 
 extern crate chrono;
 use tracing::{info, warn};
@@ -245,130 +240,7 @@ impl McpGateway {
         process::exit(0);
     }
 
-    /// Handle keyboard input for interactive commands
-    async fn interactive_keyboard_handler(
-        shutdown_flag: Arc<AtomicBool>,
-        runner: Arc<tokio::sync::Mutex<McpRunner>>,
-        server_names: Arc<Vec<String>>,
-    ) {
-        // Create channel for command passing
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(10);
-
-        // Spawn a blocking task for keyboard input
-        task::spawn_blocking(move || {
-            let mut buffer = String::new();
-
-            // Initially show help message without cluttering log output
-            println!("\nEnter a command ('h' for help):");
-
-            loop {
-                buffer.clear();
-                if std::io::stdin().read_line(&mut buffer).is_ok() {
-                    let cmd = buffer.trim().to_string();
-                    if cmd == "q" {
-                        println!("Quit command received");
-                        shutdown_flag.store(true, Ordering::SeqCst);
-                        break;
-                    } else if cmd == "s" || cmd == "t" || cmd == "h" || cmd == "help" {
-                        // Send the command through the channel
-                        if tx.blocking_send(cmd).is_err() {
-                            // Channel closed, exit the loop
-                            break;
-                        }
-                    } else if !cmd.is_empty() {
-                        println!("Unknown command: '{}'. Enter 'h' for help", cmd);
-                    }
-                }
-            }
-        });
-
-        // Process commands from the channel
-        while let Some(cmd) = rx.recv().await {
-            match cmd.as_str() {
-                "h" | "help" => {
-                    println!("\nAvailable commands:");
-                    println!(" - 's' : Show server status");
-                    println!(" - 't' : Show available tools");
-                    println!(" - 'h' : Show this help message");
-                    println!(" - 'q' : Quit the application");
-                }
-                "s" => {
-                    println!("\nServer Status:");
-                    let runner_guard = runner.lock().await;
-
-                    // Use the built-in method to get all statuses at once
-                    let statuses = runner_guard.get_all_server_statuses();
-
-                    // Display statuses for all running servers
-                    if statuses.is_empty() {
-                        println!(" - No servers are running");
-                    } else {
-                        // Use reference to avoid moving statuses
-                        for (name, status) in &statuses {
-                            println!(" - Server '{}': {:?}", name, status);
-                        }
-                    }
-
-                    // Also show servers from our list that aren't running
-                    for server_name in server_names.as_ref() {
-                        if !statuses.contains_key(server_name) {
-                            println!(" - Server '{}': Not started", server_name);
-                        }
-                    }
-                }
-                "t" => {
-                    println!("\nAvailable Tools:");
-                    let mut runner_guard = runner.lock().await;
-
-                    // Use the built-in method to get all tools at once
-                    let all_tools = runner_guard.get_all_server_tools().await;
-
-                    if all_tools.is_empty() {
-                        println!(" - No servers are running");
-                    } else {
-                        // Collect server names from the results first to avoid ownership issues
-                        let server_names_with_tools: Vec<String> =
-                            all_tools.keys().cloned().collect();
-
-                        // Now iterate through the tools
-                        for server_name in server_names_with_tools {
-                            println!("Server: {}", server_name);
-
-                            match &all_tools[&server_name] {
-                                Ok(tools) => {
-                                    if tools.is_empty() {
-                                        println!(" - No tools available");
-                                    } else {
-                                        for tool in tools {
-                                            println!(
-                                                " - Tool: {} ({})",
-                                                tool.name, tool.description
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    println!(" - Failed to list tools: {}", e);
-                                }
-                            }
-                        }
-
-                        // Check for servers from our list that aren't in the results
-                        for server_name in server_names.as_ref() {
-                            if !all_tools.contains_key(server_name) {
-                                println!("Server: {}", server_name);
-                                println!(" - Server not started");
-                            }
-                        }
-                    }
-                }
-                _ => {} // Ignore other commands
-            }
-
-            // Re-display the prompt after processing a command
-            println!("\nEnter a command ('h' for help):");
-        }
-    }
+    // Interactive keyboard handler functionality has been completely removed
 
     /// Daemonize the process on Unix platforms
     #[cfg(not(windows))]
@@ -814,64 +686,37 @@ impl McpGateway {
 
             info!("SSE proxy started successfully!");
 
-            // Setup shutdown flag and server management
-            let shutdown_flag = Arc::new(AtomicBool::new(false));
-            let server_names = Arc::new(server_names);
+            // Create simple signal handling for shutdown
             let runner_arc = Arc::new(tokio::sync::Mutex::new(runner));
 
-            if !self.daemon {
-                // Only set up interactive keyboard handler in non-daemon mode
-                let shutdown_flag_clone = shutdown_flag.clone();
-
-                // Start the interactive keyboard handler in the background
-                let keyboard_handle = tokio::spawn(Self::interactive_keyboard_handler(
-                    shutdown_flag_clone,
-                    runner_arc.clone(),
-                    server_names.clone(),
-                ));
-
-                // Wait for shutdown signal from keyboard handler or Ctrl+C
-                select! {
-                    _ = async {
-                        while !shutdown_flag.load(Ordering::SeqCst) {
-                            sleep(Duration::from_millis(100)).await;
-                        }
-                    } => {
-                        info!("Shutdown requested via keyboard command");
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        info!("Shutdown requested via Ctrl+C");
-                        shutdown_flag.store(true, Ordering::SeqCst);
-                    }
+            info!(
+                "{} and waiting for signals",
+                if self.daemon {
+                    "Daemon running"
+                } else {
+                    "Running in foreground"
                 }
+            );
 
-                // Wait for the keyboard handler to finish
-                if let Err(e) = keyboard_handle.await {
-                    warn!("Keyboard handler task error: {:?}", e);
-                }
-            } else {
-                // In daemon mode, set up minimal signal handling
-                info!("Daemon running and waiting for signals");
+            // Handle Ctrl+C signal to gracefully shut down
+            #[cfg(unix)]
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl+C signal");
+                },
+            }
 
-                // Only listen for Ctrl+C since our process doesn't handle SIGTERM correctly
-                // TODO: Consider implementing proper signal handlers for SIGTERM to allow graceful shutdown
-                #[cfg(unix)]
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {
-                        info!("Received Ctrl+C signal in daemon mode");
-                    },
-                }
+            #[cfg(not(unix))]
+            select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl+C signal");
+                },
+            }
 
-                #[cfg(not(unix))]
-                select! {
-                    _ = tokio::signal::ctrl_c() => {
-                        info!("Received Ctrl+C signal in daemon mode");
-                    },
-                }
+            info!("Termination signal received");
 
-                info!("Daemon termination signal received");
-
-                // Ensure the PID file is removed
+            // Ensure the PID file is removed if in daemon mode
+            if self.daemon {
                 if let Err(e) = self.remove_pid_file() {
                     warn!("Failed to remove PID file during shutdown: {}", e);
                 } else {
