@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use daemonize::Daemonize;
 
 #[cfg(unix)]
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]
 use nix::unistd::Pid;
 
@@ -38,15 +38,15 @@ impl McpGateway {
         let args_vec: Vec<String> = args.collect();
         let mut help_requested = false;
         let mut stop_requested = false;
-        
+
         // Default configuration
         let mut config_path = "./config.json".to_string();
         let mut daemon = false;
-        let mut pid_file = "./mcp-gateway.pid".to_string();
-        let mut log_file = "./mcp-gateway.log".to_string();
-        let mut stdout_log = "./mcp-gateway.out.log".to_string();
-        let mut stderr_log = "./mcp-gateway.err.log".to_string();
-    
+        let mut pid_file = "/tmp/mcp-gateway.pid".to_string();
+        let mut log_file = "/tmp/mcp-gateway.log".to_string();
+        let mut stdout_log = "/tmp/mcp-gateway.out.log".to_string();
+        let mut stderr_log = "/tmp/mcp-gateway.err.log".to_string();
+
         // Process arguments to extract configuration parameters first
         for arg in &args_vec {
             if arg.starts_with("--config=") {
@@ -77,13 +77,13 @@ impl McpGateway {
             stdout_log,
             stderr_log,
         };
-        
+
         // Handle special commands
         if help_requested {
             Self::print_help();
             return Err("Help requested");
         }
-    
+
         if stop_requested {
             if let Err(e) = gateway.stop() {
                 eprintln!("Error stopping daemon: {}", e);
@@ -97,8 +97,26 @@ impl McpGateway {
     /// Writes the current process ID to the PID file
     fn write_pid_file(&self) -> std::io::Result<()> {
         let pid = std::process::id().to_string();
-        fs::write(&self.pid_file, pid)?;
-        info!("PID file written to {}", self.pid_file);
+        // Use OpenOptions with proper permissions for writing the PID file
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o666)  // World writable
+                .open(&self.pid_file)?;
+            std::io::Write::write_all(&mut file, pid.as_bytes())?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(&self.pid_file, pid)?;
+        }
+        // Only log if tracing is already initialized
+        if tracing::dispatcher::has_been_set() {
+            info!("PID file written to {}", self.pid_file);
+        }
         Ok(())
     }
 
@@ -108,7 +126,7 @@ impl McpGateway {
             let mut file = fs::File::open(&self.pid_file)?;
             let mut contents = String::new();
             file.read_to_string(&mut contents)?;
-            
+
             match contents.trim().parse::<u32>() {
                 Ok(pid) => Ok(Some(pid)),
                 Err(_) => Ok(None),
@@ -143,8 +161,12 @@ impl McpGateway {
         println!("  --daemon              Run as a background daemon");
         println!("  --pid-file=<path>     Path to PID file (default: ./mcp-gateway.pid)");
         println!("  --log-file=<path>     Path to log file (default: ./mcp-gateway.log)");
-        println!("  --stdout-log=<path>   Path to stdout log when daemonized (default: ./mcp-gateway.out.log)");
-        println!("  --stderr-log=<path>   Path to stderr log when daemonized (default: ./mcp-gateway.err.log)");
+        println!(
+            "  --stdout-log=<path>   Path to stdout log when daemonized (default: ./mcp-gateway.out.log)"
+        );
+        println!(
+            "  --stderr-log=<path>   Path to stderr log when daemonized (default: ./mcp-gateway.err.log)"
+        );
         println!();
         println!("EXAMPLES:");
         println!("  mcp-gateway --config=/etc/mcp/config.json");
@@ -156,12 +178,12 @@ impl McpGateway {
     fn stop(&self) -> std::io::Result<()> {
         println!("Attempting to stop MCP Gateway daemon...");
         println!("Using PID file: {}", self.pid_file);
-        
+
         // Use read_pid_file to read the PID
         match self.read_pid_file()? {
             Some(pid) => {
                 println!("Found PID: {}", pid);
-                
+
                 #[cfg(unix)]
                 {
                     // On Unix systems, send SIGTERM
@@ -173,16 +195,16 @@ impl McpGateway {
                         }
                     }
                 }
-                
+
                 #[cfg(windows)]
                 {
                     // On Windows, use taskkill
                     use std::process::Command;
-                    
+
                     let output = Command::new("taskkill")
                         .args(&["/PID", &pid.to_string(), "/F"])
                         .output();
-                    
+
                     match output {
                         Ok(output) => {
                             if output.status.success() {
@@ -191,23 +213,23 @@ impl McpGateway {
                                 let error = String::from_utf8_lossy(&output.stderr);
                                 eprintln!("Failed to stop process: {}", error);
                             }
-                        },
+                        }
                         Err(e) => {
                             eprintln!("Failed to execute taskkill: {}", e);
                         }
                     }
                 }
-                
+
                 // Try to remove the PID file
                 if let Err(e) = self.remove_pid_file() {
                     eprintln!("Failed to remove PID file: {}", e);
                 }
-            },
+            }
             None => {
                 eprintln!("No valid PID found in PID file: {}", self.pid_file);
-            },
+            }
         }
-        
+
         process::exit(0);
     }
 
@@ -219,14 +241,14 @@ impl McpGateway {
     ) {
         // Create channel for command passing
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(10);
-    
+
         // Spawn a blocking task for keyboard input
         task::spawn_blocking(move || {
             let mut buffer = String::new();
-    
+
             // Initially show help message without cluttering log output
             println!("\nEnter a command ('h' for help):");
-    
+
             loop {
                 buffer.clear();
                 if std::io::stdin().read_line(&mut buffer).is_ok() {
@@ -247,7 +269,7 @@ impl McpGateway {
                 }
             }
         });
-    
+
         // Process commands from the channel
         while let Some(cmd) = rx.recv().await {
             match cmd.as_str() {
@@ -261,10 +283,10 @@ impl McpGateway {
                 "s" => {
                     println!("\nServer Status:");
                     let runner_guard = runner.lock().await;
-    
+
                     // Use the built-in method to get all statuses at once
                     let statuses = runner_guard.get_all_server_statuses();
-    
+
                     // Display statuses for all running servers
                     if statuses.is_empty() {
                         println!(" - No servers are running");
@@ -274,7 +296,7 @@ impl McpGateway {
                             println!(" - Server '{}': {:?}", name, status);
                         }
                     }
-    
+
                     // Also show servers from our list that aren't running
                     for server_name in server_names.as_ref() {
                         if !statuses.contains_key(server_name) {
@@ -285,27 +307,31 @@ impl McpGateway {
                 "t" => {
                     println!("\nAvailable Tools:");
                     let mut runner_guard = runner.lock().await;
-    
+
                     // Use the built-in method to get all tools at once
                     let all_tools = runner_guard.get_all_server_tools().await;
-    
+
                     if all_tools.is_empty() {
                         println!(" - No servers are running");
                     } else {
                         // Collect server names from the results first to avoid ownership issues
-                        let server_names_with_tools: Vec<String> = all_tools.keys().cloned().collect();
-    
+                        let server_names_with_tools: Vec<String> =
+                            all_tools.keys().cloned().collect();
+
                         // Now iterate through the tools
                         for server_name in server_names_with_tools {
                             println!("Server: {}", server_name);
-    
+
                             match &all_tools[&server_name] {
                                 Ok(tools) => {
                                     if tools.is_empty() {
                                         println!(" - No tools available");
                                     } else {
                                         for tool in tools {
-                                            println!(" - Tool: {} ({})", tool.name, tool.description);
+                                            println!(
+                                                " - Tool: {} ({})",
+                                                tool.name, tool.description
+                                            );
                                         }
                                     }
                                 }
@@ -314,7 +340,7 @@ impl McpGateway {
                                 }
                             }
                         }
-    
+
                         // Check for servers from our list that aren't in the results
                         for server_name in server_names.as_ref() {
                             if !all_tools.contains_key(server_name) {
@@ -326,7 +352,7 @@ impl McpGateway {
                 }
                 _ => {} // Ignore other commands
             }
-    
+
             // Re-display the prompt after processing a command
             println!("\nEnter a command ('h' for help):");
         }
@@ -334,63 +360,144 @@ impl McpGateway {
 
     /// Daemonize the process on Unix platforms
     #[cfg(not(windows))]
-    fn daemonize(&self) -> McpResult<()> {
+    fn daemonize(&mut self) -> McpResult<()> {
         use std::io::Write;
         println!("Starting in daemon mode");
-        
+
         // Convert relative paths to absolute paths for daemon mode
         let current_dir = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
         let stdout_log = if Path::new(&self.stdout_log).is_absolute() {
             self.stdout_log.clone()
         } else {
-            current_dir.join(&self.stdout_log).to_string_lossy().into_owned()
+            current_dir
+                .join(&self.stdout_log)
+                .to_string_lossy()
+                .into_owned()
         };
-        
+
         let stderr_log = if Path::new(&self.stderr_log).is_absolute() {
             self.stderr_log.clone()
         } else {
-            current_dir.join(&self.stderr_log).to_string_lossy().into_owned()
+            current_dir
+                .join(&self.stderr_log)
+                .to_string_lossy()
+                .into_owned()
         };
         
+        let pid_file = if Path::new(&self.pid_file).is_absolute() {
+            self.pid_file.clone()
+        } else {
+            current_dir
+                .join(&self.pid_file)
+                .to_string_lossy()
+                .into_owned()
+        };
+
         // Create paths for daemon log files and ensure directories exist
-        for path in &[&stdout_log, &stderr_log] {
+        for path in &[&stdout_log, &stderr_log, &pid_file] {
             if let Some(parent) = Path::new(path).parent() {
                 if !parent.exists() {
                     if let Err(e) = std::fs::create_dir_all(parent) {
-                        eprintln!("Failed to create log directory for {}: {}", path, e);
+                        eprintln!("Failed to create directory for {}: {}", path, e);
                         return Err(mcp_runner::error::Error::Other(format!(
-                            "Failed to create log directory: {}", e
+                            "Failed to create directory: {}",
+                            e
                         )));
                     }
                 }
             }
         }
         
+        // Create PID file with permissive permissions before daemonizing
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o666)  // World writable
+                .open(&pid_file) 
+            {
+                Ok(mut file) => {
+                    // Write PID directly to ensure the file has content
+                    let pid = std::process::id().to_string();
+                    if let Err(e) = std::io::Write::write_all(&mut file, pid.as_bytes()) {
+                        eprintln!("Warning: Failed to write to PID file: {}", e);
+                        // Continue anyway
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to create PID file {}: {}", pid_file, e);
+                    return Err(mcp_runner::error::Error::Other(format!(
+                        "Failed to create PID file: {}", e
+                    )));
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if let Err(e) = std::fs::File::create(&pid_file) {
+                eprintln!("Failed to create PID file {}: {}", pid_file, e);
+                return Err(mcp_runner::error::Error::Other(format!(
+                    "Failed to create PID file: {}", e
+                )));
+            }
+        }
+
         // Write pre-daemonize messages to log files
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        
+
         // Write to stdout log
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .append(true)
-            .open(&stdout_log) {
+            .open(&stdout_log)
+        {
             let _ = writeln!(file, "[{}] Daemon starting process", timestamp);
         }
-        
+
         // Write to stderr log
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .append(true)
-            .open(&stderr_log) {
+            .open(&stderr_log)
+        {
             let _ = writeln!(file, "[{}] Daemon starting process", timestamp);
+        }
+
+        // Make config path absolute if it's relative
+        if !Path::new(&self.config_path).is_absolute() {
+            self.config_path = current_dir.join(&self.config_path).to_string_lossy().into_owned();
         }
         
         // Don't change the working directory - this can break relative paths
+        // Ensure PID file directory exists and we have write permission
+        // This prevents "unable to open pid file" error
+        if let Some(parent) = Path::new(&self.pid_file).parent() {
+            if !parent.exists() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!("Failed to create directory for PID file {}: {}", self.pid_file, e);
+                    return Err(mcp_runner::error::Error::Other(format!(
+                        "Failed to create directory for PID file: {}", e
+                    )));
+                }
+            }
+        }
+        
+        // Test if we can write to the PID file before daemonizing
+        // This prevents permission errors when the daemonize library tries to create it
+        if let Err(e) = self.write_pid_file() {
+            eprintln!("Failed to create PID file {}: {}", self.pid_file, e);
+            return Err(mcp_runner::error::Error::Other(format!(
+                "Failed to create PID file: {}", e
+            )));
+        }
+        
         let daemonize = Daemonize::new()
-            .pid_file(&self.pid_file)
-            .chown_pid_file(true)
+            .pid_file(&pid_file)  // Let the Daemonize library handle the initial PID file
             .umask(0o022) // More permissive umask for files (world readable)
             .stdout(
                 std::fs::OpenOptions::new()
@@ -414,18 +521,22 @@ impl McpGateway {
                         std::process::exit(1)
                     }),
             );
-            
+
         match daemonize.start() {
             Ok(_) => {
                 // We're in the daemon process now
                 // Logging will be initialized in run() after this returns
-                println!("[{}] Daemon process started with PID {}", 
+                println!(
+                    "[{}] Daemon process started with PID {}",
                     chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                    std::process::id());
-                
-                eprintln!("[{}] Daemon error output test", 
-                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
-                    
+                    std::process::id()
+                );
+
+                eprintln!(
+                    "[{}] Daemon error output test",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                );
+
                 Ok(())
             }
             Err(e) => {
@@ -447,10 +558,12 @@ impl McpGateway {
     /// Initialize logging based on config
     fn setup_logging(&self) -> std::io::Result<()> {
         use std::fs::{self, OpenOptions};
-        use std::path::Path;
         use std::io::Write;
+        use std::path::Path;
         use tracing_subscriber::{EnvFilter, fmt};
-        
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+
         if self.daemon {
             // For daemon mode, log to file
             // First, make sure the directory exists
@@ -459,70 +572,110 @@ impl McpGateway {
                     fs::create_dir_all(parent)?;
                 }
             }
-            
+
+            // Ensure file is writable by creating it with appropriate permissions
+            // Touch the file first to ensure it exists with correct permissions
+            // This is critical for daemon mode to work properly
+            #[cfg(unix)]
+            {
+                match OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .mode(0o666) // World writable
+                    .open(&self.log_file)
+                {
+                    Ok(mut file) => {
+                        // Write an initial log entry directly
+                        let init_msg = format!("Log file initialized at {}\n", 
+                            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+                        let _ = std::io::Write::write_all(&mut file, init_msg.as_bytes());
+                    },
+                    Err(e) => {
+                        eprintln!("Warning: Failed to create log file with proper permissions: {}", e);
+                        // Continue anyway, we'll try standard permissions
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open(&self.log_file)?;
+            }
+                
+            // Also check that our PID file exists with the correct content
+            if let Err(e) = self.write_pid_file() {
+                eprintln!("Warning: Failed to update PID file: {}", e);
+                // Continue anyway, not critical for logging
+            }
+
             // Write a direct test message to verify we can write to the file
-            let test_message = format!("[INIT] Daemon starting at {}\n", 
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
-            
+            let test_message = format!(
+                "[INIT] Daemon starting at {}\n",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
+
             fs::write(&self.log_file, &test_message)?;
-            
+
             // Now set up logging with tracing
             let log_file = OpenOptions::new()
                 .create(true)
                 .write(true)
                 .append(true)
                 .open(&self.log_file)?;
-            
+
             // Initialize tracing to log file
             match fmt()
-                .with_env_filter(EnvFilter::from_env("MCP_GW_LOG").add_directive(tracing::Level::INFO.into()))
+                .with_env_filter(
+                    EnvFilter::from_env("MCP_GW_LOG").add_directive(tracing::Level::INFO.into()),
+                )
                 .with_target(true)
-                .with_ansi(false)  // Disable ANSI color codes in log files
+                .with_ansi(false) // Disable ANSI color codes in log files
                 .with_writer(log_file)
-                .try_init() {
-                    Ok(_) => {
-                        // Use std::fs to append another message to confirm tracing is set up
-                        let mut file = OpenOptions::new()
-                            .append(true)
-                            .open(&self.log_file)?;
-                        writeln!(file, "[INIT] Tracing initialized successfully")?;
-                    }
-                    Err(e) => {
-                        // Write the error directly to the log file since we can't log it
-                        let mut file = OpenOptions::new()
-                            .append(true)
-                            .open(&self.log_file)?;
-                        writeln!(file, "[ERROR] Failed to initialize tracing: {}", e)?;
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Other, 
-                            format!("Failed to initialize tracing: {}", e)
-                        ));
-                    }
+                .try_init()
+            {
+                Ok(_) => {
+                    // Use std::fs to append another message to confirm tracing is set up
+                    let mut file = OpenOptions::new().append(true).open(&self.log_file)?;
+                    writeln!(file, "[INIT] Tracing initialized successfully")?;
                 }
-                
+                Err(e) => {
+                    // Write the error directly to the log file since we can't log it
+                    let mut file = OpenOptions::new().append(true).open(&self.log_file)?;
+                    writeln!(file, "[ERROR] Failed to initialize tracing: {}", e)?;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Failed to initialize tracing: {}", e),
+                    ));
+                }
+            }
+
             // Now try to log using tracing - this will work if initialization succeeded
             info!("Daemon logging initialized to file: {}", self.log_file);
         } else {
             // For interactive mode, log to console
             fmt()
-                .with_env_filter(EnvFilter::from_env("MCP_GW_LOG").add_directive(tracing::Level::INFO.into()))
+                .with_env_filter(
+                    EnvFilter::from_env("MCP_GW_LOG").add_directive(tracing::Level::INFO.into()),
+                )
                 .with_target(true)
                 .init();
-                
+
             info!("Console logging initialized");
         }
-        
+
         Ok(())
     }
 
     /// Main function to run the MCP Gateway
-    pub async fn run(self) -> McpResult<()> {
+    pub async fn run(mut self) -> McpResult<()> {
         // Handle daemon mode if requested
         if self.daemon {
             // Daemonize before setting up logging
             self.daemonize()?;
         }
-        
+
         // Initialize logging based on run mode
         if let Err(e) = self.setup_logging() {
             // If in daemon mode, try to write error to stderr directly as a last resort
@@ -530,41 +683,48 @@ impl McpGateway {
                 let message = format!("Failed to initialize logging: {}\n", e);
                 let _ = std::fs::write(&self.stderr_log, message);
             }
-            return Err(mcp_runner::error::Error::Other(
-                format!("Failed to initialize logging: {}", e)
-            ));
+            return Err(mcp_runner::error::Error::Other(format!(
+                "Failed to initialize logging: {}",
+                e
+            )));
         }
-        
-        // Log system information 
+
+        // Log system information
         info!("System information for debugging:");
         info!("  PID: {}", std::process::id());
-        info!("  Working dir: {}", std::env::current_dir().unwrap_or_default().display());
-        
+        info!(
+            "  Working dir: {}",
+            std::env::current_dir().unwrap_or_default().display()
+        );
+
         // Log startup mode
         if self.daemon {
             info!("Running in daemon mode with PID file: {}", self.pid_file);
             
-            // Write PID file after daemonization
+            // Ensure the PID file contains our current PID (daemon process)
+            // This is important because the Daemonize library might have created it with parent PID
             if let Err(e) = self.write_pid_file() {
-                warn!("Failed to write PID file: {}", e);
+                warn!("Failed to update PID file with daemon process ID: {}", e);
+            } else {
+                info!("Updated PID file with daemon process ID: {}", std::process::id());
             }
         } else {
             info!("Running in foreground mode");
         }
-    
+
         // Initialize McpRunner
         let mut runner = McpRunner::from_config_file(&self.config_path)?;
-    
+
         // Check if SSE proxy is configured
         if runner.is_sse_proxy_configured() {
             // Start both servers first
             info!("Starting MCP servers");
             let server_ids = runner.start_all_servers().await?;
             info!("Started {} servers", server_ids.len());
-    
+
             // Extract server names
             let server_names = vec!["fetch".to_string(), "filesystem".to_string()];
-    
+
             // Make sure all servers are properly registered before starting the proxy
             for name in &server_names {
                 if let Ok(server_id) = runner.get_server_id(name) {
@@ -572,19 +732,19 @@ impl McpGateway {
                     info!("Server '{}' status: {:?}", name, status);
                 }
             }
-    
+
             // Start the SSE proxy server - now using address and port from config
             info!("Starting SSE proxy");
             runner.start_sse_proxy().await?;
-    
+
             info!("SSE proxy started successfully!");
             info!("Available HTTP endpoints:");
-    
+
             // Using values from the example config file
             let sse_proxy_config = runner.get_sse_proxy_config()?;
             let host = &sse_proxy_config.address;
             let port = &sse_proxy_config.port;
-    
+
             info!(
                 " - SSE events stream:           GET    http://{}:{}/sse",
                 host, port
@@ -593,33 +753,33 @@ impl McpGateway {
                 " - JSON-RPC messages:           POST   http://{}:{}/sse/messages",
                 host, port
             );
-    
+
             info!("Example JSON-RPC tool call with curl:");
             info!("curl -X POST http://{}:{}/sse/messages \\", host, port);
             info!("  -H \"Content-Type: application/json\" \\");
             info!(
                 "  -d '{{\"jsonrpc\":\"2.0\", \"id\":\"req-123\", \"method\":\"tools/call\", \"params\":{{\"server\":\"fetch\", \"tool\":\"fetch\", \"arguments\":{{\"url\":\"https://example.com\"}}}}}}' "
             );
-    
+
             info!("Example SSE client with curl:");
             info!("curl -N http://{}:{}/sse", host, port);
-    
+
             // Setup shutdown flag and server management
             let shutdown_flag = Arc::new(AtomicBool::new(false));
             let server_names = Arc::new(server_names);
             let runner_arc = Arc::new(tokio::sync::Mutex::new(runner));
-        
+
             if !self.daemon {
                 // Only set up interactive keyboard handler in non-daemon mode
                 let shutdown_flag_clone = shutdown_flag.clone();
-            
+
                 // Start the interactive keyboard handler in the background
                 let keyboard_handle = tokio::spawn(Self::interactive_keyboard_handler(
                     shutdown_flag_clone,
                     runner_arc.clone(),
                     server_names.clone(),
                 ));
-            
+
                 // Wait for shutdown signal from keyboard handler or Ctrl+C
                 select! {
                     _ = async {
@@ -634,7 +794,7 @@ impl McpGateway {
                         shutdown_flag.store(true, Ordering::SeqCst);
                     }
                 }
-            
+
                 // Wait for the keyboard handler to finish
                 if let Err(e) = keyboard_handle.await {
                     warn!("Keyboard handler task error: {:?}", e);
@@ -642,15 +802,16 @@ impl McpGateway {
             } else {
                 // In daemon mode, set up a simple signal handler
                 info!("Daemon running and waiting for signals");
-                
+
                 // Create a signal handler to wait for termination request
                 #[cfg(unix)]
                 let terminate = async {
-                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    {
                         Ok(mut signal) => {
                             signal.recv().await;
                             info!("Received SIGTERM signal");
-                        },
+                        }
                         Err(e) => {
                             warn!("Failed to set up SIGTERM handler: {}", e);
                         }
@@ -659,7 +820,7 @@ impl McpGateway {
 
                 #[cfg(not(unix))]
                 let terminate = std::future::pending::<()>();
-                
+
                 // Wait for Ctrl+C or SIGTERM on Unix
                 select! {
                     _ = tokio::signal::ctrl_c() => {
@@ -669,12 +830,12 @@ impl McpGateway {
                         info!("Received termination signal in daemon mode");
                     }
                 }
-                
+
                 info!("Daemon termination signal received");
             }
-    
+
             info!("Shutting down");
-    
+
             // Stop all servers and the proxy
             let mut runner_guard = runner_arc.lock().await;
             if let Err(e) = runner_guard.stop_all_servers().await {
@@ -684,15 +845,19 @@ impl McpGateway {
             warn!("mcp-gateway not configured in {}", self.config_path);
             warn!("Please add sseProxy configuration to your config file");
         }
-    
+
         // Clean up PID file if in daemon mode
         if self.daemon {
             if let Err(e) = self.remove_pid_file() {
                 warn!("Failed to remove PID file: {}", e);
+            } else {
+                info!(
+                    "Daemon process exiting, removed PID file: {}",
+                    self.pid_file
+                );
             }
-            info!("Daemon process exiting, removed PID file: {}", self.pid_file);
         }
-    
+
         info!("mcp-gateway terminated");
         Ok(())
     }
