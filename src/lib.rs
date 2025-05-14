@@ -682,12 +682,52 @@ impl McpGateway {
 
             // Start the SSE proxy server - now using address and port from config
             info!("Starting SSE proxy");
-            runner.start_sse_proxy().await?;
 
-            info!("SSE proxy started successfully!");
-
-            // Create simple signal handling for shutdown
+            // Create runtime management structures before starting the server
             let runner_arc = Arc::new(tokio::sync::Mutex::new(runner));
+            let runner_clone = Arc::clone(&runner_arc);
+
+            // Use a oneshot channel to know when the server has fully started
+            let (tx, rx) = tokio::sync::oneshot::channel();
+
+            // Start the SSE proxy on a separate task to avoid initialization issues in daemon mode
+            tokio::spawn(async move {
+                let mut runner = runner_clone.lock().await;
+                if let Err(e) = runner.start_sse_proxy().await {
+                    // Signal failure
+                    let _ = tx.send(Err(e));
+                } else {
+                    // Signal success
+                    let _ = tx.send(Ok(()));
+                }
+            });
+
+            // Wait for the server to start (with timeout)
+            match tokio::time::timeout(tokio::time::Duration::from_secs(5), rx).await {
+                Ok(Ok(Ok(()))) => {
+                    info!("SSE proxy started successfully!");
+                }
+                Ok(Ok(Err(e))) => {
+                    return Err(mcp_runner::error::Error::Other(format!(
+                        "Failed to start SSE proxy: {}",
+                        e
+                    )));
+                }
+                Ok(Err(_)) => {
+                    return Err(mcp_runner::error::Error::Other(
+                        "Internal channel error when starting SSE proxy".to_string(),
+                    ));
+                }
+                Err(_) => {
+                    return Err(mcp_runner::error::Error::Other(
+                        "Timeout waiting for SSE proxy to start".to_string(),
+                    ));
+                }
+            }
+
+            // Now that server is confirmed started, give it a moment to fully initialize worker threads
+            // This is critical for daemon mode where background initialization may be interrupted
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
             info!(
                 "{} and waiting for signals",
@@ -698,18 +738,43 @@ impl McpGateway {
                 }
             );
 
-            // Handle Ctrl+C signal to gracefully shut down
+            // Create a future that never resolves
+            let forever = std::future::pending::<()>();
+
+            // Handle signals in a more robust way
             #[cfg(unix)]
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Received Ctrl+C signal");
-                },
-            }
+            let signal_handler = async {
+                use tokio::signal::unix::{SignalKind, signal};
+
+                // Set up multiple signal handlers
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("Failed to set up SIGTERM handler");
+                let mut sigint =
+                    signal(SignalKind::interrupt()).expect("Failed to set up SIGINT handler");
+
+                tokio::select! {
+                    _ = sigterm.recv() => {
+                        info!("Received SIGTERM signal");
+                    },
+                    _ = sigint.recv() => {
+                        info!("Received SIGINT signal");
+                    },
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("Received Ctrl+C signal");
+                    },
+                }
+            };
 
             #[cfg(not(unix))]
-            select! {
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Received Ctrl+C signal");
+            let signal_handler = tokio::signal::ctrl_c();
+
+            // Wait for either a signal or the forever future (which never completes)
+            tokio::select! {
+                _ = signal_handler => {
+                    info!("Termination signal received");
+                },
+                _ = forever => {
+                    unreachable!("The forever future should never complete");
                 },
             }
 
