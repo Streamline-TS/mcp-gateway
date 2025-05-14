@@ -105,7 +105,7 @@ impl McpGateway {
                 .create(true)
                 .write(true)
                 .truncate(true)
-                .mode(0o666)  // World writable
+                .mode(0o666) // World writable
                 .open(&self.pid_file)?;
             std::io::Write::write_all(&mut file, pid.as_bytes())?;
         }
@@ -186,12 +186,22 @@ impl McpGateway {
 
                 #[cfg(unix)]
                 {
-                    // On Unix systems, send SIGTERM
-                    match kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
-                        Ok(_) => println!("Signal sent to process {}. Daemon stopping.", pid),
+                    // On Unix systems, send SIGKILL directly since SIGTERM isn't working reliably
+                    // Note: This is because the process is likely not setting up proper signal handlers
+                    // or is ignoring SIGTERM. Using SIGKILL is more reliable but doesn't allow for
+                    // graceful shutdown. Consider implementing proper SIGTERM handling in the future.
+                    match kill(Pid::from_raw(pid as i32), Signal::SIGKILL) {
+                        Ok(_) => {
+                            println!("SIGKILL sent to process {}.", pid);
+                            // Give the process a brief moment to be cleaned up
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        }
                         Err(e) => {
-                            eprintln!("Failed to send signal: {}", e);
-                            return Ok(());
+                            if e.to_string().contains("No such process") {
+                                println!("Process {} is not running.", pid);
+                            } else {
+                                eprintln!("Failed to send SIGKILL: {}", e);
+                            }
                         }
                     }
                 }
@@ -223,6 +233,8 @@ impl McpGateway {
                 // Try to remove the PID file
                 if let Err(e) = self.remove_pid_file() {
                     eprintln!("Failed to remove PID file: {}", e);
+                } else {
+                    println!("PID file removed successfully");
                 }
             }
             None => {
@@ -383,7 +395,7 @@ impl McpGateway {
                 .to_string_lossy()
                 .into_owned()
         };
-        
+
         let pid_file = if Path::new(&self.pid_file).is_absolute() {
             self.pid_file.clone()
         } else {
@@ -407,7 +419,7 @@ impl McpGateway {
                 }
             }
         }
-        
+
         // Create PID file with permissive permissions before daemonizing
         #[cfg(unix)]
         {
@@ -416,8 +428,8 @@ impl McpGateway {
                 .create(true)
                 .write(true)
                 .truncate(true)
-                .mode(0o666)  // World writable
-                .open(&pid_file) 
+                .mode(0o666) // World writable
+                .open(&pid_file)
             {
                 Ok(mut file) => {
                     // Write PID directly to ensure the file has content
@@ -426,11 +438,12 @@ impl McpGateway {
                         eprintln!("Warning: Failed to write to PID file: {}", e);
                         // Continue anyway
                     }
-                },
+                }
                 Err(e) => {
                     eprintln!("Failed to create PID file {}: {}", pid_file, e);
                     return Err(mcp_runner::error::Error::Other(format!(
-                        "Failed to create PID file: {}", e
+                        "Failed to create PID file: {}",
+                        e
                     )));
                 }
             }
@@ -440,7 +453,8 @@ impl McpGateway {
             if let Err(e) = std::fs::File::create(&pid_file) {
                 eprintln!("Failed to create PID file {}: {}", pid_file, e);
                 return Err(mcp_runner::error::Error::Other(format!(
-                    "Failed to create PID file: {}", e
+                    "Failed to create PID file: {}",
+                    e
                 )));
             }
         }
@@ -470,35 +484,43 @@ impl McpGateway {
 
         // Make config path absolute if it's relative
         if !Path::new(&self.config_path).is_absolute() {
-            self.config_path = current_dir.join(&self.config_path).to_string_lossy().into_owned();
+            self.config_path = current_dir
+                .join(&self.config_path)
+                .to_string_lossy()
+                .into_owned();
         }
-        
+
         // Don't change the working directory - this can break relative paths
         // Ensure PID file directory exists and we have write permission
         // This prevents "unable to open pid file" error
         if let Some(parent) = Path::new(&self.pid_file).parent() {
             if !parent.exists() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    eprintln!("Failed to create directory for PID file {}: {}", self.pid_file, e);
+                    eprintln!(
+                        "Failed to create directory for PID file {}: {}",
+                        self.pid_file, e
+                    );
                     return Err(mcp_runner::error::Error::Other(format!(
-                        "Failed to create directory for PID file: {}", e
+                        "Failed to create directory for PID file: {}",
+                        e
                     )));
                 }
             }
         }
-        
+
         // Test if we can write to the PID file before daemonizing
         // This prevents permission errors when the daemonize library tries to create it
         if let Err(e) = self.write_pid_file() {
             eprintln!("Failed to create PID file {}: {}", self.pid_file, e);
             return Err(mcp_runner::error::Error::Other(format!(
-                "Failed to create PID file: {}", e
+                "Failed to create PID file: {}",
+                e
             )));
         }
-        
+
         let daemonize = Daemonize::new()
-            .pid_file(&pid_file)  // Let the Daemonize library handle the initial PID file
-            .working_directory(std::env::current_dir().unwrap())  // Keep current directory
+            .pid_file(&pid_file) // Let the Daemonize library handle the initial PID file
+            .working_directory(std::env::current_dir().unwrap()) // Keep current directory
             .umask(0o022) // More permissive umask for files (world readable)
             .stdout(
                 std::fs::OpenOptions::new()
@@ -542,7 +564,7 @@ impl McpGateway {
                         std::process::id()
                     );
                 }
-                
+
                 // Logging will be initialized in run() after this returns
                 println!(
                     "[{}] Daemon process started with PID {}",
@@ -577,10 +599,10 @@ impl McpGateway {
     fn setup_logging(&self) -> std::io::Result<()> {
         use std::fs::{self, OpenOptions};
         use std::io::Write;
-        use std::path::Path;
-        use tracing_subscriber::{EnvFilter, fmt};
         #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
+        use std::path::Path;
+        use tracing_subscriber::{EnvFilter, fmt};
 
         if self.daemon {
             // For daemon mode, log to file
@@ -604,12 +626,17 @@ impl McpGateway {
                 {
                     Ok(mut file) => {
                         // Write an initial log entry directly
-                        let init_msg = format!("Log file initialized at {}\n", 
-                            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+                        let init_msg = format!(
+                            "Log file initialized at {}\n",
+                            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                        );
                         let _ = std::io::Write::write_all(&mut file, init_msg.as_bytes());
-                    },
+                    }
                     Err(e) => {
-                        eprintln!("Warning: Failed to create log file with proper permissions: {}", e);
+                        eprintln!(
+                            "Warning: Failed to create log file with proper permissions: {}",
+                            e
+                        );
                         // Continue anyway, we'll try standard permissions
                     }
                 }
@@ -621,7 +648,7 @@ impl McpGateway {
                     .write(true)
                     .open(&self.log_file)?;
             }
-                
+
             // Also check that our PID file exists with the correct content
             if let Err(e) = self.write_pid_file() {
                 eprintln!("Warning: Failed to update PID file: {}", e);
@@ -718,32 +745,41 @@ impl McpGateway {
         // Log startup mode
         if self.daemon {
             info!("Running in daemon mode with PID file: {}", self.pid_file);
-            
+
             // Note: PID file should already contain daemon process ID (updated in daemonize())
             // But let's verify it just to be safe
             match self.read_pid_file() {
                 Ok(Some(pid)) if pid == std::process::id() => {
-                    info!("Confirmed PID file contains correct daemon process ID: {}", pid);
-                },
+                    info!(
+                        "Confirmed PID file contains correct daemon process ID: {}",
+                        pid
+                    );
+                }
                 Ok(Some(pid)) => {
-                    warn!("PID file contains incorrect process ID: {}. Updating to current PID: {}", 
-                          pid, std::process::id());
+                    warn!(
+                        "PID file contains incorrect process ID: {}. Updating to current PID: {}",
+                        pid,
+                        std::process::id()
+                    );
                     if let Err(e) = self.write_pid_file() {
                         warn!("Failed to update PID file with daemon process ID: {}", e);
                     }
-                },
+                }
                 Ok(None) => {
                     warn!("PID file exists but contains no valid PID. Updating with current PID");
                     if let Err(e) = self.write_pid_file() {
                         warn!("Failed to update PID file with daemon process ID: {}", e);
                     }
-                },
+                }
                 Err(e) => {
                     warn!("Failed to read PID file: {}. Creating new one", e);
                     if let Err(e) = self.write_pid_file() {
                         warn!("Failed to update PID file with daemon process ID: {}", e);
                     } else {
-                        info!("Updated PID file with daemon process ID: {}", std::process::id());
+                        info!(
+                            "Updated PID file with daemon process ID: {}",
+                            std::process::id()
+                        );
                     }
                 }
             }
@@ -777,31 +813,6 @@ impl McpGateway {
             runner.start_sse_proxy().await?;
 
             info!("SSE proxy started successfully!");
-            info!("Available HTTP endpoints:");
-
-            // Using values from the example config file
-            let sse_proxy_config = runner.get_sse_proxy_config()?;
-            let host = &sse_proxy_config.address;
-            let port = &sse_proxy_config.port;
-
-            info!(
-                " - SSE events stream:           GET    http://{}:{}/sse",
-                host, port
-            );
-            info!(
-                " - JSON-RPC messages:           POST   http://{}:{}/sse/messages",
-                host, port
-            );
-
-            info!("Example JSON-RPC tool call with curl:");
-            info!("curl -X POST http://{}:{}/sse/messages \\", host, port);
-            info!("  -H \"Content-Type: application/json\" \\");
-            info!(
-                "  -d '{{\"jsonrpc\":\"2.0\", \"id\":\"req-123\", \"method\":\"tools/call\", \"params\":{{\"server\":\"fetch\", \"tool\":\"fetch\", \"arguments\":{{\"url\":\"https://example.com\"}}}}}}' "
-            );
-
-            info!("Example SSE client with curl:");
-            info!("curl -N http://{}:{}/sse", host, port);
 
             // Setup shutdown flag and server management
             let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -839,38 +850,33 @@ impl McpGateway {
                     warn!("Keyboard handler task error: {:?}", e);
                 }
             } else {
-                // In daemon mode, set up a simple signal handler
+                // In daemon mode, set up minimal signal handling
                 info!("Daemon running and waiting for signals");
 
-                // Create a signal handler to wait for termination request
+                // Only listen for Ctrl+C since our process doesn't handle SIGTERM correctly
+                // TODO: Consider implementing proper signal handlers for SIGTERM to allow graceful shutdown
                 #[cfg(unix)]
-                let terminate = async {
-                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    {
-                        Ok(mut signal) => {
-                            signal.recv().await;
-                            info!("Received SIGTERM signal");
-                        }
-                        Err(e) => {
-                            warn!("Failed to set up SIGTERM handler: {}", e);
-                        }
-                    }
-                };
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("Received Ctrl+C signal in daemon mode");
+                    },
+                }
 
                 #[cfg(not(unix))]
-                let terminate = std::future::pending::<()>();
-
-                // Wait for Ctrl+C or SIGTERM on Unix
                 select! {
                     _ = tokio::signal::ctrl_c() => {
                         info!("Received Ctrl+C signal in daemon mode");
                     },
-                    _ = terminate => {
-                        info!("Received termination signal in daemon mode");
-                    }
                 }
 
                 info!("Daemon termination signal received");
+
+                // Ensure the PID file is removed
+                if let Err(e) = self.remove_pid_file() {
+                    warn!("Failed to remove PID file during shutdown: {}", e);
+                } else {
+                    info!("PID file removed during shutdown");
+                }
             }
 
             info!("Shutting down");
