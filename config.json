@@ -1,9 +1,9 @@
 {
   "sseProxy": {
-    "allowedServers": ["fetch"],
+    "allowedServers": ["fetch", "shell"],
     "authenticate": {
       "bearer": {
-        "token": "your_token_here"
+        "token": "vhlWcWKL33DU284b-izjLZ6QoceC6drr01JJQM_3rj0"
       }
     },
     "address": "0.0.0.0",
@@ -15,9 +15,12 @@
       "command": "uvx",
       "args": ["mcp-server-fetch"]
     },
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    "shell": {
+      "command": "uvx",
+      "args": ["mcp-shell-server"],
+      "env": {
+        "ALLOW_COMMANDS": "ls,cat,pwd,grep,wc,touch,find"
+      }
     }
   }
 }
