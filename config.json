@@ -3,7 +3,7 @@
     "allowedServers": ["fetch", "shell"],
     "authenticate": {
       "bearer": {
-        "token": "vhlWcWKL33DU284b-izjLZ6QoceC6drr01JJQM_3rj0"
+        "token": "your_token_here"
       }
     },
     "address": "0.0.0.0",
